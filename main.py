@@ -386,8 +386,8 @@ DB_PATH = "user_data.db"
 iso_forest = IsolationForest()
 
 # Load pre-trained models safely
-MODEL_PATH = "E:\\RYZE\\RYZE\\model\\isolation_forest.pkl"
-SCALER_PATH = "E:\\RYZE\\RYZE\\model\\scaler.pkl"
+MODEL_PATH = "E:\\RYZE_APP\\model\\isolation_forest.pkl"
+SCALER_PATH = "E:\\RYZE_APP\\model\\scaler.pkl"
 
 with open("isolation_forest.pkl", "wb") as f:
     pickle.dump(iso_forest, f)
