@@ -2,21 +2,17 @@ from fastapi import FastAPI, Depends, HTTPException
 from mim import train
 from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, Float, Boolean, String, Integer, ForeignKey
-from sqlalchemy.orm import sessionmaker, Session, declarative_base, relationship
-import bcrypt, jwt
+from sqlalchemy.orm import sessionmaker, Session, declarative_base, relationship 
 from typing import Optional
-import sqlite3
-import pandas as pd
-import pickle ,urllib.parse
-import os
+import pandas as pd,pickle ,urllib.parse,os ,requests,bcrypt, jwt
+from sqlalchemy.exc import SQLAlchemyError
 from sklearn.ensemble import IsolationForest
 from datetime import datetime, timedelta
 from twilio.rest import Client
-import requests
 from twilio.http.http_client import TwilioHttpClient
 from twilio.rest import Client
-
-
+import psycopg2
+from psycopg2.extras import DictCursor
 app = FastAPI()
 
 
@@ -182,8 +178,7 @@ def register_user(user: UserCreate, db: Session = Depends(get_db)):
         "status": "1",
         "message": "User registered successfully!",
         "id": db_user.id
-    }
-
+}
 @app.post("/Login")
 async def login(request: LoginRequest, db: Session = Depends(get_db)):
     email = request.email.strip()
@@ -191,7 +186,6 @@ async def login(request: LoginRequest, db: Session = Depends(get_db)):
     if not user or not verify_password(request.password, user.password):
         return {"status": "0", "message": "Invalid credentials",
                 "result": {}}
-    
     access_token = create_access_token(data={"sub": user.email}, expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     return {
     "status": "1",
@@ -218,24 +212,19 @@ async def login(request: LoginRequest, db: Session = Depends(get_db)):
         "point": "0",
         "token": access_token}}
 
-
 @app.post("/forgot-password")
 def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.mobile == request.mobile).first() # type: ignore
     if not user:
         return {"status": "0", "message": "User not found", "result": {}}
-    
     # Generate a random OTP (for production, use a more secure random generator)
     import random
     otp = str(random.randint(1000, 9999))
-    
     otp_expiration = (datetime.utcnow() + timedelta(minutes=10)).isoformat()
     user.otp = otp
     user.otp_expiration = otp_expiration
-    
     try:
         db.commit()
-        # Send OTP
         send_success = send_otp(user.mobile, otp)
         if send_success:
             return {"status": "1", "message": f"OTP sent to {user.mobile}", "result": {"otp": otp}}
@@ -250,8 +239,7 @@ async def send_otp(request: OTPRequest):
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     try:
         message = client.verify.services(VERIFY_SERVICE_SID).verifications.create(
-            to=request.mobile, channel="sms"
-        )
+            to=request.mobile, channel="sms" )
         return {"success": True, "message": "OTP sent successfully!"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -289,7 +277,6 @@ def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db))
     user = db.query(User).filter(User.id == request.id).first() # type: ignore
     if not user:
         return {"Status": "0", "Message": "User not found","result":{}}
-    
     user.password = hash_password(request.password)
     db.commit()
     return { "status":"1",
@@ -313,8 +300,7 @@ def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db))
         "district": "",
         "qr_image": "",
         "qr_code": "",
-        "point": "0"
-    },
+        "point": "0"},
     "status": "1"}
 class Expenses(BaseModel):
     income: float
@@ -329,22 +315,18 @@ class Expenses(BaseModel):
     electricity: float
     water: float
     insurance: float
-
 class LoanDetails(BaseModel):
     loan_exists: bool
     loan_amount: Optional[float] = None
     monthly_payment: Optional[float] = None
     loan_term: Optional[int] = None
     interest_rate: Optional[float] = None
-
 class Lifestyle(BaseModel):
     smoke: bool
     dine_out_frequency: str
     sports_hobbies: str
-
 class FinancialGoals(BaseModel):
     goal: str
-
 class UserFinancialData(BaseModel):
     user_id: int
     monthly_income: float
@@ -358,16 +340,13 @@ def submit_financial_data(data: UserFinancialData, db: Session = Depends(get_db)
     user = db.query(User).filter(User.id == data.user_id).first() # type: ignore
     if not user:
         return {"status": "0", "message": "User not found","result":{}}
-
     user.monthly_income = data.monthly_income
     expenses = ExpensesDB(user_id=user.id, **data.expenses.dict()) # type: ignore
     loan_details = LoanDetailsDB(user_id=user.id, **data.loan_details.dict()) # type: ignore
     lifestyle = LifestyleDB(user_id=user.id, **data.lifestyle.dict()) # type: ignore
     financial_goals = FinancialGoalsDB(user_id=user.id, **data.financial_goals.dict()) # type: ignore
-
     db.add_all([expenses, loan_details, lifestyle, financial_goals])
     db.commit()
-    
     return {
         "status": "1",
         "message": "Financial data stored successfully",
@@ -377,35 +356,28 @@ def submit_financial_data(data: UserFinancialData, db: Session = Depends(get_db)
             "expenses": data.expenses.dict(),
             "loan_details": data.loan_details.dict(),
             "lifestyle": data.lifestyle.dict(),
-            "financial_goals": data.financial_goals.dict()
-        }
-    }
+            "financial_goals": data.financial_goals.dict()} }
 #Get method
 DB_PATH = "user_data.db"
 # Train a new model
 iso_forest = IsolationForest()
-
 # Load pre-trained models safely
 MODEL_PATH = "E:\\RYZE_APP\\model\\isolation_forest.pkl"
 SCALER_PATH = "E:\\RYZE_APP\\model\\scaler.pkl"
 
 with open("isolation_forest.pkl", "wb") as f:
     pickle.dump(iso_forest, f)
-
 try:
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
     with open(MODEL_PATH, "rb") as f:
         iso_forest = pickle.load(f)
-
     if not os.path.exists(SCALER_PATH):
         raise FileNotFoundError(f"Scaler file not found: {SCALER_PATH}")
     with open(SCALER_PATH, "rb") as f:
         scaler = pickle.load(f)
-
 except FileNotFoundError as e:
     raise HTTPException(status_code=500, detail=str(e))
-
 # Column name mapping to match trained model
 COLUMN_MAPPING = {
     "income": "Income",
@@ -419,54 +391,38 @@ COLUMN_MAPPING = {
     "education": "Education",
     "electricity": "Electricity",
     "water": "Water",
-    "insurance": "Insurance",
-} 
-
+    "insurance": "Insurance",} 
+DB_CONFIG = {
+    "dbname": "ryze_db",
+    "user": "postgres",
+    "password": 'RGS@123',
+    "host": "172.31.10.201",
+    "port": "5432" }
 # Fetch user data with correct column names
-def fetch_user_data(user_id: int):
+def fetch_user_data(user_id: int, db: Session):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-
-        query = """
-        SELECT income, rent, groceries, transportation, healthcare, dining_out, shopping,
-               personal_care, education, electricity, water, insurance
-        FROM Expenses WHERE user_id = ?
-        """
-        cursor.execute(query, (user_id,))
-        result = cursor.fetchone()
-        cursor.close()
-        conn.close()
-
+        result = db.query(ExpensesDB).filter(ExpensesDB.user_id == user_id).first()
         if result:
-            user_data = {COLUMN_MAPPING[key]: value for key, value in dict(result).items()}
+            user_data = {COLUMN_MAPPING[key]: value for key, value in dict(result.__dict__).items() if key in COLUMN_MAPPING}
             return user_data
         else:
             raise HTTPException(status_code=404, detail=f"User data not found for user_id: {user_id}")
-
-    except sqlite3.Error as err:
-        raise HTTPException(status_code=500, detail=f"Database error: {err}")
-
-# Analyze spending and provide structured insights
+    except SQLAlchemyError as err:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(err)}")
 def analyze_spending(user_data):
     income = user_data["Income"]
     user_df = pd.DataFrame([user_data])
     user_df["Total Spending"] = user_df.drop(columns=["Income"]).sum(axis=1)
     user_df["Spending Percentage"] = (user_df["Total Spending"] / income) * 100
-
     try:
         user_df[['Income', 'Total Spending', 'Spending Percentage']] = scaler.transform(
-            user_df[['Income', 'Total Spending', 'Spending Percentage']]
-        )
+            user_df[['Income', 'Total Spending', 'Spending Percentage']])
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error during scaling: {str(e)}")
-
     try:
         anomaly_if = iso_forest.predict(user_df[['Income', 'Total Spending', 'Spending Percentage']])[0]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error during anomaly prediction: {str(e)}")
-
     spending_categories = {k: v for k, v in user_data.items() if k != "Income"}
     highest_spending_category = max(spending_categories, key=spending_categories.get) # type: ignore
     spending_percentage = user_df['Spending Percentage'][0]
@@ -480,14 +436,11 @@ def analyze_spending(user_data):
     else:
         status = "Critical"
         advice = "Your spending pattern is unusual. Review your expenses to prevent financial risks."
-
     high_expenses = [
         cat for cat, value in spending_categories.items()
         if (cat in ['Rent', 'Education'] and value > (0.3 * income))
-        or (cat not in ['Rent', 'Education'] and value > (0.2 * income))
-    ]
+        or (cat not in ['Rent', 'Education'] and value > (0.2 * income))]
     overspending_alerts = [f"{cat} exceeds 20% of your income." for cat in high_expenses]
-
     return {
         "spending_analysis": {
             "status": status,
@@ -505,32 +458,27 @@ def analyze_spending(user_data):
                         "Groceries": f"You allocate ${user_data['Groceries']} to groceries.",
                         "Transportation": f"Your transportation costs are ${user_data['Transportation']}.",
                         "Healthcare": f"You spend ${user_data['Healthcare']} on healthcare.",
-                        "Insurance": f"Your insurance costs are ${user_data['Insurance']}.",
-                    },
+                        "Insurance": f"Your insurance costs are ${user_data['Insurance']}.",},
                     "Utilities": {
                         "Electricity": f"Electricity costs are ${user_data['Electricity']}.",
-                        "Water": f"Your water bill is ${user_data['Water']}.",
-                    },
+                        "Water": f"Your water bill is ${user_data['Water']}.",},
                     "Discretionary Spending": {
                         "Dining Out": f"Dining out expenses are ${user_data['Dining_Out']}.",
                         "Shopping": f"Shopping costs are ${user_data['Shopping']}.",
                         "Personal Care": f"Personal care expenses are ${user_data['Personal_Care']}.",
-                        "Education": f"Education costs amount to ${user_data['Education']}.",
-                    }}}}}
+                        "Education": f"Education costs amount to ${user_data['Education']}.", }}}}}
 
 @app.get("/predict_spending_behavior/{user_id}")
-def predict_spending_behavior(user_id: int):
+def predict_spending_behavior(user_id: int, db: Session = Depends(get_db)):
     try:
-        user_data = fetch_user_data(user_id)
+        user_data = fetch_user_data(user_id, db)
         result = analyze_spending(user_data)
         return result
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
-
 # #END Get
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="debug")
