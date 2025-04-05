@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from twilio.rest import Client
 from twilio.http.http_client import TwilioHttpClient
 from twilio.rest import Client
-import psycopg2
+import psycopg2 , random
 from psycopg2.extras import DictCursor
 app = FastAPI()
 
@@ -47,9 +47,8 @@ class User(Base):
     mobile = Column(String, nullable=False)
     otp = Column(String, nullable=True)
     otp_expiration = Column(String, nullable=True)
-
-    expenses = relationship("ExpensesDB", back_populates="user", uselist=False)
-    loan_details = relationship("LoanDetailsDB", back_populates="user", uselist=False)
+    expenses = relationship("ExpensesDB", back_populates="user", cascade="all,delete-orphan")
+    loan_details = relationship("LoanDetailsDB", back_populates="user", cascade="all, delete-orphan")
     lifestyle = relationship("LifestyleDB", back_populates="user", uselist=False)
     financial_goals = relationship("FinancialGoalsDB", back_populates="user", uselist=False)
 
@@ -72,12 +71,13 @@ class ExpensesDB(Base):
     insurance = Column(Float)
 
     user = relationship("User", back_populates="expenses")
+    
 
 class LoanDetailsDB(Base):
     __tablename__ = "loan_details"
     
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
     loan_exists = Column(Boolean)
     loan_amount = Column(Float, nullable=True)
     monthly_payment = Column(Float, nullable=True)
@@ -211,20 +211,35 @@ async def login(request: LoginRequest, db: Session = Depends(get_db)):
         "qr_code": "",
         "point": "0",
         "token": access_token}}
-
+def send_otp(mobile: str, otp: str):
+    """Send OTP to the user's mobile number via Twilio."""
+    client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    try:
+        message = client.messages.create(
+            body=f"Your OTP code is {otp}. It is valid for 10 minutes.",
+            from_=VERIFY_SERVICE_SID,
+            to=mobile
+        )
+        return True  # Indicate success
+    except Exception as e:
+        print(f"Error sending OTP: {e}")
+        return False
 @app.post("/forgot-password")
 def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.mobile == request.mobile).first() # type: ignore
     if not user:
         return {"status": "0", "message": "User not found", "result": {}}
+    
     # Generate a random OTP (for production, use a more secure random generator)
     import random
     otp = str(random.randint(1000, 9999))
+    
     otp_expiration = (datetime.utcnow() + timedelta(minutes=10)).isoformat()
     user.otp = otp
     user.otp_expiration = otp_expiration
     try:
         db.commit()
+        # Send OTP
         send_success = send_otp(user.mobile, otp)
         if send_success:
             return {"status": "1", "message": f"OTP sent to {user.mobile}", "result": {"otp": otp}}
@@ -233,16 +248,7 @@ def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(get_db
     except Exception as e:
         db.rollback()
         return {"status": "0", "message": f"Error: {str(e)}", "result": {}}
-    
-@app.post("/send_otp")
-async def send_otp(request: OTPRequest):
-    client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    try:
-        message = client.verify.services(VERIFY_SERVICE_SID).verifications.create(
-            to=request.mobile, channel="sms" )
-        return {"success": True, "message": "OTP sent successfully!"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/verify-otp")
 def verify_otp(request: OTPVerificationRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.mobile == request.mobile).first() # type: ignore
@@ -302,6 +308,16 @@ def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db))
         "qr_code": "",
         "point": "0"},
     "status": "1"}
+    
+@app.delete("/users/{user_id}")
+def delete_user(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        return {"status":"0","message":"User not found"}
+    db.delete(user)
+    db.commit()
+    return {"status":"1","message": f"User with id {user_id} deleted successfully"}
+    
 class Expenses(BaseModel):
     income: float
     rent: float
@@ -358,7 +374,7 @@ def submit_financial_data(data: UserFinancialData, db: Session = Depends(get_db)
             "lifestyle": data.lifestyle.dict(),
             "financial_goals": data.financial_goals.dict()} }
 #Get method
-DB_PATH = "user_data.db"
+DB_PATH = "ryze_db"
 # Train a new model
 iso_forest = IsolationForest()
 # Load pre-trained models safely
